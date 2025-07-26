@@ -77,8 +77,18 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
     yield();
+    if (p->ticks > 0 && p->handler_running == 0) {
+      p->tick_cnt++;
+      if (p->tick_cnt >= p->ticks) {
+        p->tick_cnt = 0;
+        p->handler_running = 1; // avoid re-entry
+        p->trapframe_bat = *p->trapframe; // keep the user register so we can restore after handler
+        p->trapframe->epc = p->handler;
+      }
+    }
+  }
 
   usertrapret();
 }
