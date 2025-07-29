@@ -315,7 +315,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -324,19 +324,27 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    // add cow flag only for PTE_W page
+    if ((flags & PTE_W) != 0) {
+      flags = (flags | PTE_COW) & (~PTE_W);
     }
+    inc_page_rcnt((uint64)pa); // inc rcnt
+    uvmunmap(old, i, 1, 0);
+    mappages(old, i, PGSIZE, (uint64)pa, flags);
+    mappages(new, i, PGSIZE, (uint64)pa, flags);
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    // if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    //   kfree(mem);
+    //   goto err;
+    // }
   }
   return 0;
 
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
+//  err:
+//   uvmunmap(new, 0, i / PGSIZE, 1);
+//   return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -367,13 +375,36 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
       return -1;
     pte = walk(pagetable, va0, 0);
     if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+       (*pte & (PTE_W | PTE_COW)) == 0)
       return -1;
     pa0 = PTE2PA(*pte);
+
+    char* mem = (void *)pa0;
+    if ((*pte & PTE_COW) != 0) {
+      if ((*pte & PTE_W) != 0) {
+        printf("copyout: PTE_W & PTE_COW exists at the same time. %p", *pte);
+        exit(-1);
+      }
+      if (get_page_rcnt(pa0) > 1) {
+        dec_page_rcnt(pa0);
+        if((mem = kalloc()) == 0) {
+          panic("copyout: no enough ram.");
+          exit(-1);
+        }
+        memmove(mem, (char*)pa0, PGSIZE);
+      }
+      uint flags = (PTE_FLAGS((uint64)*pte) | PTE_W) & (~PTE_COW);
+      uvmunmap(pagetable, va0, 1, 0);
+      if(mappages(pagetable, va0, PGSIZE, (uint64)mem, flags) != 0) {
+        kfree(mem);
+        panic("copyout: mappages error.");
+      }
+    }
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
-    memmove((void *)(pa0 + (dstva - va0)), src, n);
+    memmove((void *)(mem + (dstva - va0)), src, n);
 
     len -= n;
     src += n;

@@ -65,6 +65,42 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if (r_scause() == 15) {
+    pte_t *pte;
+    char *mem;
+
+    uint64 err_va = PGROUNDDOWN(r_stval());
+    if (err_va >= MAXVA) {
+      printf("wrong va: %p", err_va);
+      exit(-1);
+    }
+    if((pte = walk(p->pagetable, err_va, 0)) == 0)
+      panic("cow: pte should exist");
+    if ((*pte & PTE_COW) == 0) {
+      printf("unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      exit(-1);
+    }
+
+    uint64 pa = PTE2PA((uint64)*pte);
+    if (get_page_rcnt(pa) > 1) {
+      dec_page_rcnt(pa);
+      if((mem = kalloc()) == 0) {
+        panic("cow: no enough ram.");
+        exit(-1);
+      }
+      memmove(mem, (char*)pa, PGSIZE);
+    } else {
+      // dont need alloc when only one process use the pa.
+      mem = (void*)pa;
+    }
+    
+    uint flags = (PTE_FLAGS((uint64)*pte) | PTE_W) & (~PTE_COW);
+    uvmunmap(p->pagetable, err_va, 1, 0);
+    if(mappages(p->pagetable, err_va, PGSIZE, (uint64)mem, flags) != 0) {
+      kfree(mem);
+      panic("cow: mappages error.");
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
