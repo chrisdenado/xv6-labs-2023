@@ -68,6 +68,13 @@ cpuid()
   return id;
 }
 
+int safe_cpuid() {
+  push_off();
+  int id = cpuid();
+  pop_off();
+  return id;
+}
+
 // Return this CPU's cpu struct.
 // Interrupts must be disabled.
 struct cpu*
