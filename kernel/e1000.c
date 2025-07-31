@@ -20,6 +20,8 @@ static struct mbuf *rx_mbufs[RX_RING_SIZE];
 static volatile uint32 *regs;
 
 struct spinlock e1000_lock;
+struct spinlock e1000_tx_lock;
+struct spinlock e1000_rx_lock;
 
 // called by pci_init().
 // xregs is the memory address at which the
@@ -30,6 +32,8 @@ e1000_init(uint32 *xregs)
   int i;
 
   initlock(&e1000_lock, "e1000");
+  initlock(&e1000_tx_lock, "e1000_tx_lock");
+  initlock(&e1000_rx_lock, "e1000_rx_lock");
 
   regs = xregs;
 
@@ -102,8 +106,28 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
-  return 0;
+  int intr_stat = intr_get();
+  intr_off();
+  acquire(&e1000_tx_lock);
+  int ret = 0;
+  uint32 pi = regs[E1000_TDT];
+  if ((tx_ring[pi].status & E1000_TXD_STAT_DD) == 0) {
+    ret = -1;
+  } else {
+    if (tx_mbufs[pi]) {
+      mbuffree(tx_mbufs[pi]);
+      tx_mbufs[pi] = 0;
+    }
+    tx_mbufs[pi] = m;
+    tx_ring[pi].cmd = 0x1F;
+    tx_ring[pi].length = m->len;
+    tx_ring[pi].addr = (uint64) tx_mbufs[pi]->head;
+    regs[E1000_TDT] = (pi+1) % TX_RING_SIZE;
+  }
+  release(&e1000_tx_lock);
+  if (intr_stat)
+    intr_on();
+  return ret;
 }
 
 static void
@@ -115,6 +139,31 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  // static int cnt = 0;
+  int intr_stat = intr_get();
+  intr_off();
+  acquire(&e1000_rx_lock);
+  // ++cnt;
+  while(1) {
+    uint32 pi = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    
+    if ((rx_ring[pi].status & E1000_RXD_STAT_DD) == 0) {
+      // printf("rx not ready, %d, %d, %d\n", pi, cnt, rx_ring[pi].status);
+      goto done;
+    } else {
+      // printf("rx: %d, %d, %d, %d, %d\n", pi, cnt, rx_ring[pi].status, regs[E1000_RDH], regs[E1000_RDT]);
+      rx_mbufs[pi]->len = rx_ring[pi].length;
+      net_rx(rx_mbufs[pi]);
+      rx_mbufs[pi] = mbufalloc(0);
+      memset(&rx_ring[pi], 0, sizeof(rx_ring[pi]));
+      rx_ring[pi].addr = (uint64) rx_mbufs[pi]->head;
+      regs[E1000_RDT] = pi;
+    }
+  }
+done:
+  release(&e1000_rx_lock);
+  if (intr_stat)
+    intr_on();
 }
 
 void
