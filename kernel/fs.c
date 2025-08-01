@@ -416,6 +416,39 @@ bmap(struct inode *ip, uint bn)
     brelse(bp);
     return addr;
   }
+  bn -= NINDIRECT;
+  if (bn < ND_INDIRECT) {
+    int flevel = bn / NINDIRECT, slevel = bn % NINDIRECT;
+    if((addr = ip->addrs[NDIRECT+1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = addr;
+    }
+    // first layer
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[flevel]) == 0){
+      addr = balloc(ip->dev);
+      if(addr){
+        a[flevel] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    // second layer
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[slevel]) == 0){
+      addr = balloc(ip->dev);
+      if(addr){
+        a[slevel] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    return addr;
+  }
 
   panic("bmap: out of range");
 }
