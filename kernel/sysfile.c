@@ -302,6 +302,29 @@ create(char *path, short type, short major, short minor)
 }
 
 uint64
+sys_symlink(void) {
+  char path[MAXPATH], target[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+  begin_op();
+  ip = create(path, T_SYMLINK, 0, 0); // create return ip with lock
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  int n = writei(ip, 0, (uint64)target, 0, strlen(target));
+  if (n < strlen(target)) {
+    printf("writei error. %d < %d\n", n, strlen(target));
+  }
+  // use iunlockput rather than iunlock to decrease ref_cnt.
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
+uint64
 sys_open(void)
 {
   char path[MAXPATH];
@@ -328,6 +351,24 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    if (ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {
+      int cnt = 0;
+      while (ip->type == T_SYMLINK) {
+        char target[MAXPATH];
+        int n = readi(ip, 0, (uint64)target, 0, MAXPATH);
+        if (n < 0) {
+          printf("symlink: readi error.\n");
+        }
+        iunlockput(ip); // release old lock
+        ip = namei(target);
+        if (!ip || ++cnt >= 10) {
+          end_op();
+          return -1;
+        }
+        ilock(ip); // apply new lock
+      }
+    }
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
