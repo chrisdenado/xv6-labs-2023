@@ -503,3 +503,113 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64 sys_mmap(void) {
+  struct file* f;
+  uint64 addr, len, offset;
+  int prot, flags;
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  int fd;
+  if(argfd(4, &fd, &f) < 0)
+    return -1;
+  argaddr(5, &offset);
+  if ( (f->readable == 0 && (prot & PROT_READ) != 0) || 
+      ((f->writable == 0 && (prot & PROT_WRITE) != 0) && flags != MAP_PRIVATE) ) {
+    return -1;
+  }
+  filedup(f);
+  struct proc* p = myproc();
+
+  if ((uint64)addr == 0)
+    addr = p->sz;
+  uint64 sz = 0;
+  if((sz = uvmalloc(p->pagetable, addr, addr + len, PTE_MMAP)) == 0) {
+    return -1;
+  }
+  p->sz = sz;
+  // uvmalloc will set PTE_R.... so here cancel it, to trigger trap
+  for (uint64 i=addr; i<p->sz; i+=PGSIZE) {
+    pte_t* pte = 0;
+    if((pte = walk(p->pagetable, i, 0)) == 0)
+      return -1;
+    *pte &= (~PTE_R);
+  }
+
+  int i = 0;
+  for (;i<VMASLOT; ++i) {
+    if (p->vmas[i].valid == 0) {
+      break;
+    }
+  }
+  if (i == VMASLOT)
+    return -1;
+
+  p->vmas[i].valid = 1;
+  p->vmas[i].addr = addr;
+  p->vmas[i].f = f;
+  p->vmas[i].flags = flags;
+  p->vmas[i].prot = prot;
+  p->vmas[i].len = len;
+  p->vmas[i].offset = (off_t)offset;
+
+  return addr;
+}
+
+void help_munmap(int i, uint64 addr, uint64 len) {
+  struct proc* p = myproc();
+  if (p->vmas[i].flags == MAP_SHARED) {
+    begin_op();
+    ilock(p->vmas[i].f->ip);
+    uint64 tmp = PGROUNDDOWN(addr);
+    while (tmp < addr + len) {
+      pte_t* pte;
+      if((pte = walk(p->pagetable, tmp, 0)) == 0) {
+        printf("error");
+        return;
+      }
+      // only loaded page without PTE_MMAP, so we flush this page back.
+      if ((*pte & PTE_MMAP) == 0) {
+        int r = writei(p->vmas[i].f->ip, 1, tmp, tmp - p->vmas[i].addr, PGSIZE);
+        if (r <= 0) {
+          printf("write error.");
+        }
+      }
+      tmp += PGSIZE;
+    }
+    
+    iunlock(p->vmas[i].f->ip);
+    end_op();
+  }
+  
+  if (p->vmas[i].addr == addr && p->vmas[i].len == len) {
+    fileclose(p->vmas[i].f);
+    memset(&p->vmas[i], 0, sizeof(p->vmas[i]));
+  } else if (p->vmas[i].addr == addr) {
+    p->vmas[i].addr = addr + len;
+    p->vmas[i].len -= len;
+  } else if (p->vmas[i].addr + p->vmas[i].len == addr + len) {
+    p->vmas[i].len -= len;
+  }
+}
+
+uint64 sys_munmap(void) {
+  uint64 addr, len;
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  struct proc* p = myproc();
+  int i =0;
+  for (; i<VMASLOT; ++i) {
+    if (p->vmas[i].valid && addr >= p->vmas[i].addr && 
+        addr < p->vmas[i].addr + p->vmas[i].len) {
+      break;
+    }
+  }
+  if (i == VMASLOT) return 0;
+
+  help_munmap(i, addr, len);
+
+  return 0;
+}

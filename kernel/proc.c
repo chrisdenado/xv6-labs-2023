@@ -55,6 +55,7 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
+      memset(p->vmas, 0, sizeof(p->vmas));
   }
 }
 
@@ -296,6 +297,13 @@ fork(void)
   }
   np->sz = p->sz;
 
+  for (int i=0; i<VMASLOT; ++i) {
+    np->vmas[i] = p->vmas[i];
+    if (np->vmas[i].valid) {
+      filedup(np->vmas[i].f);
+    }
+  }
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -357,6 +365,14 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  for (int i=0; i<VMASLOT; ++i) {
+    if (p->vmas[i].valid) {
+      // the simplest way: if no unmap, then we drop the change, even it's mmap_share
+      fileclose(p->vmas[i].f);
+      // help_munmap(i, p->vmas[i].addr, p->vmas[i].len);
     }
   }
 

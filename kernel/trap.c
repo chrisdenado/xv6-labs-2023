@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,6 +69,46 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    uint64 err_va = PGROUNDDOWN(r_stval());
+    if (err_va >= MAXVA) {
+      printf("wrong va: %p", err_va);
+      exit(-1);
+    }
+
+    int i = 0;
+    for (; i<VMASLOT; ++i) {
+      if (p->vmas[i].valid && err_va >= (uint64)p->vmas[i].addr &&
+          err_va < (uint64)p->vmas[i].addr + p->vmas[i].len) {
+        break;
+      }
+    }
+    if (i == VMASLOT) {
+      printf("wrong va: %p", err_va);
+      exit(-1);
+    }
+    pte_t *pte;
+    if((pte = walk(p->pagetable, err_va, 0)) == 0)
+      panic("cow: pte should exist");
+    if ((*pte & PTE_MMAP) == 0) {
+      exit(-1);
+    }
+    if ( (r_scause() == 13 && (p->vmas[i].prot & PROT_READ) == 0) || 
+        (r_scause() == 15 && (p->vmas[i].prot & PROT_WRITE) == 0) ) {
+      exit(-1);
+    }    
+    // readi need write permission
+    *pte |= (PTE_R | PTE_W);
+    *pte &= (~PTE_MMAP);
+    ilock(p->vmas[i].f->ip);
+    int r = readi(p->vmas[i].f->ip, 1, err_va, err_va - (uint64)p->vmas[i].addr, PGSIZE);
+    iunlock(p->vmas[i].f->ip);
+    if ((p->vmas[i].prot & PROT_READ) == 0) *pte &= (~PTE_R);
+    if ((p->vmas[i].prot & PROT_WRITE) == 0) *pte &= (~PTE_W);
+    if (r < 0) {
+      printf("read error");
+      exit(-1);
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
